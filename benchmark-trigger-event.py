@@ -1,120 +1,130 @@
+##!/usr/bin/env python
+
+"""A skeleton for a python rsyslog output plugin
+   Copyright (C) 2014 by Adiscon GmbH
+   This file is part of rsyslog.
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+ 
+         http://www.apache.org/licenses/LICENSE-2.0
+         -or-
+         see COPYING.ASL20 in the source distribution
+ 
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+"""
+import select
 import requests
+import urllib3
 import json
-import time
+import sys
+import logging
 import datetime
-import requests.packages.urllib3 as urllib3
+import time
 import uuid
-urllib3.disable_warnings()
-# Need to install requests package for python
-# pip install requests
+import concurrent.futures
+import threading
+# Config & NetBrain API Functions
+import config
+import nbfunctions as nb
 
-user = "admin"                               # account to log in to your NetBrain Domain       
-pwd = "P@ssw0rd"                               # password 
-host_url = "https://nb80.thegorbit.net"               # The URL of your NetBrain Domain
-headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}
-headers1 = {'Content-Type': 'application/json', 'Accept': 'application/json'}
-triggerTaskID = str(uuid.uuid1())
-ipAddr = "10.0.100.1"
-deviceName = "dc-rt01"
+# Global Threading Options
+thread_local = threading.local()
 
+# skeleton config parameters
+pollPeriod = 0.0001 # the number of seconds between polling for new messages
+maxAtOnce = 1024  # max nbr of messages that are processed within one batch
 
-'''
-Get token for netbrain
-'''
-TENANT = 'Initial Tenant'
-DOMAIN = 'LAB'
+# Create and configure logger 
+logging.basicConfig(filename=config.logLocation+config.logfile, 
+                    format='%(asctime)s - %(levelno)s-%(levelname)s - %(message)s', 
+                    filemode='a')
 
-def getTokens(user,password):
-    login_api_url = r"/ServicesAPI/API/V1/Session"
-    Login_url = host_url + login_api_url
-    data = {
-        "username": user,
-        "password": password
-    }
-    token = requests.post(Login_url, data=json.dumps(
-        data), headers=headers, verify=False)
-    if token.status_code == 200:
-        print(token.json())
-        return token.json()["token"]
-    else:
-        return "error"
-# get token 
-token = getTokens(user,pwd)
-headers["Token"] = token
+# Creating a logging object 
+logger=logging.getLogger(__name__)
 
-def get_tenant_domain_id():
+# Setting the threshold of logger to DEBUG 
+logger.setLevel(logging.DEBUG) 
 
-    tenant_id_url = '/ServicesAPI/API/V1/CMDB/Tenants' 
-    full_url = host_url + tenant_id_url
-    data = requests.get(full_url,headers=headers,verify=False)
-    # tenant_id = '78a825ef-24bd-729d-f56f-a1ad2b79f2ff'
-    # domain_id = '36700aff-c585-4f23-95eb-8ea00214b778'
-    print(data.json())
-    if data.status_code == 200:
-        for tenant in data.json()['tenants']:
-            if TENANT == tenant['tenantName']:
-                tenant_id = tenant['tenantId']
-        if tenant_id:
-            domain_id_url = '/ServicesAPI/API/V1/CMDB/Domains'
-            full_domain_url = host_url +domain_id_url
-            domain_data = requests.get(full_domain_url,params={'tenantId':tenant_id},headers=headers,verify=False)
-            print(domain_data.json())
-            if domain_data.status_code == 200:
-                for domain in domain_data.json()['domains']:
-                    if DOMAIN == domain['domainName']:
-                        domain_id = domain['domainId']
-        return tenant_id,domain_id
-    else:
-        return tenant_id,domain_id
+def onInit():
+	""" Do everything that is needed to initialize processing (e.g.
+	    open files, create handles, connect to systems...)
+    """
 
-tenant_id,domain_id = get_tenant_domain_id()
-print(tenant_id,domain_id)
-headers["TenantGuid"]= tenant_id
-headers["DomainGuid"]= domain_id
-
-def Logout():
-    logout_url = "/ServicesAPI/API/V1/Session"
-    time.sleep(2)
-    full_url = host_url + logout_url
-    body = {
-        "token": token
-        }
-    result = requests.delete(full_url, data=json.dumps(body), headers=headers, verify=False)
-    print('Logout: ' + str(result.json()))
-    if result.status_code == 200:
-        print("LogOut success...")
-    else:
-        data = "errorCode" + "LogOut API test failed... "
-        return result.json()
-# Trigger API function
-
-def PublishEvent(Event_Data):
-    # Trigger  API url
-    API_URL = r"/ServicesAPI/API/V1/CMDB/EventDriven/Events"
-    # Trigger API payload
-    print(headers)
-    api_full_url = host_url + API_URL
-    print('api_full_url: ' + api_full_url)
-    api_result = requests.post(api_full_url, data=json.dumps(Event_Data), headers=headers, verify=False)
-    if api_result.status_code == 200:
-        return api_result.json()
-    else:
-        return api_result.json()
+def onReceive(msgs):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        # Start the load operations and mark each future with its URL
+        future_to_msg = {executor.submit(netbrainTrigger, msg): msg for msg in msgs}
+        for future in concurrent.futures.as_completed(future_to_msg):
+            msg = future_to_msg[future]
+            try:
+                data = future.result()
+            except Exception as e:
+                logger.error("TaskID: " + str(data) + " | Task Failed - " + str(e))
+            else:
+                logger.info("TaskID: " + str(data) + " | Task Successful")
 
 
-if __name__ =="__main__":
-    #tenant_id,domain_id = get_tenant_domain_id()
-    #print(tenant_id,domain_id)
-    # tenant_id = '0b7eb490-d9cf-aacc-672c-ff9d58a47032'
-    # domain_id = '53e4b108-086e-4b6f-95b8-ee23bd7d142a'
-    Event_Data = {
-        "type": "syslog-event",
-        "sys_updated_on": str(datetime.datetime.now()),
-        "u_source_ip_new": ipAddr,
-        "devicename": deviceName,
-        "opened_by": {
-            "link": "rsyslog",
-            "value": triggerTaskID
-        }
-    }
-print(PublishEvent(Event_Data))
+def netbrainTrigger(msg):
+    # Set general options
+    nb_url = config.nb_url
+    tenant_id = config.tenant_id
+    domain_id = config.domain_id
+    username = config.username
+    password = config.password
+    auth_id = config.auth_id
+    headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}
+    taskID = str(uuid.uuid4())
+    logger.info("TaskID: " + taskID + " | Task Starting")
+
+    # Lookup IP from syslog message
+    ip_addr = nb.find_ip_addr(msg, taskID)
+
+    # Login to NetBrain, add token to header
+    token = nb.api_login(nb_url, headers, taskID, username, password, auth_id)
+    headers["Token"] = token
+
+    # Set NetBrain working domain
+    nb.set_domain(nb_url, headers, taskID, domain_id, tenant_id)
+
+    # Lookup device hostname in NetBrain
+    device = nb.lookup_hostname(nb_url, headers, taskID, ip_addr)
+
+    # Call Event Driven Automation Trigger
+    nb.PublishEvent(nb_url, headers, taskID, ip_addr, device)
+
+    # Logout of session
+    nb.logout(nb_url, headers, taskID)
+    return taskID
+
+
+def onExit():
+	""" Do everything that is needed to finish processing (e.g.
+	    close files, handles, disconnect from systems...). This is
+	    being called immediately before exiting.
+	"""
+
+# Do not modify
+onInit()
+keepRunning = 1
+while keepRunning == 1:
+    while keepRunning and sys.stdin in select.select([sys.stdin], [], [], pollPeriod)[0]:
+        msgs = []
+        msgsInBatch = 0
+        while keepRunning and sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
+            line = sys.stdin.readline()
+            if line:
+                msgs.append(line)
+            else: # an empty line means stdin has been closed
+                keepRunning = 0
+            msgsInBatch = msgsInBatch + 1
+            if msgsInBatch >= maxAtOnce:
+                break;
+        if len(msgs) > 0:
+            onReceive(msgs)
+            sys.stdout.flush() # very important, Python buffers far too much!
+onExit()
